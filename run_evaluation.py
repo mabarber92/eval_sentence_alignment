@@ -47,5 +47,5 @@ def build_passim():
 
 
 if __name__ == "__main__":
-    # run_eval_sequence()
-    build_passim()
+    run_eval_sequence()
+    # build_passim()

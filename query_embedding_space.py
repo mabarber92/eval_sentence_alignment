@@ -151,6 +151,15 @@ class embeddingSpace():
                     selected.append(m)
         return selected
 
+    @staticmethod
+    def _save_figure(fig, html_out):
+        """Write figure as HTML and high-res PNG. PNG requires kaleido to be installed."""
+        fig.write_html(html_out)
+        try:
+            fig.write_image(html_out.replace(".html", ".png"), scale=3)
+        except Exception as e:
+            print(f"PNG export failed (is kaleido installed?): {e}")
+
     def _build_plot_df(self, labels, group_ids=None, models=None):
         """Build the UMAP-reduced df, optionally filtered to group_ids and a subset of models."""
         full_df = pd.DataFrame()
@@ -183,7 +192,7 @@ class embeddingSpace():
         )
         fig.update_xaxes(matches=None)
         fig.update_yaxes(matches=None)
-        fig.write_html(html_out)
+        self._save_figure(fig, html_out)
 
     def graph_eval_sample(self, labels, html_out, n_pass=5, n_fail=5, n_mixed=5, top_models=None, bottom_models=None):
         """Sample passing, failing, and mixed groups and draw a demo-ready graph.
@@ -210,8 +219,9 @@ class embeddingSpace():
             overall_pass_rate[(overall_pass_rate > 0.0) & (overall_pass_rate < 1.0)].index
         ].sort_values(ascending=False)
 
-        sampled_pass = np.random.choice(passing, size=min(n_pass, len(passing)), replace=False)
-        sampled_fail = np.random.choice(failing, size=min(n_fail, len(failing)), replace=False)
+        rng = np.random.default_rng(42)
+        sampled_pass = rng.choice(passing, size=min(n_pass, len(passing)), replace=False)
+        sampled_fail = rng.choice(failing, size=min(n_fail, len(failing)), replace=False)
         sampled_mixed = mixed_candidates.head(n_mixed).index.values
         selected = np.concatenate([sampled_pass, sampled_fail, sampled_mixed])
 
@@ -251,7 +261,7 @@ class embeddingSpace():
         fig.update_layout(showlegend=False)
         fig.update_xaxes(matches=None)
         fig.update_yaxes(matches=None)
-        fig.write_html(html_out)
+        self._save_figure(fig, html_out)
 
     def run_full_evaluation(self, labels, output_dir, top_n=5, n_pass=5, n_fail=5, n_mixed=5, top_models=None, bottom_models=None):
         """Run all evaluation steps and save results to output_dir.
@@ -324,6 +334,7 @@ class embeddingSpace():
 
                 rank = true_pair_positions[0] + 1 if true_pair_positions else None  # 1-indexed
                 has_true_pair = rank is not None  # rank is None iff counterpart was None/filtered
+                true_pair_score = ranked.loc[true_pair_positions[0], "cosine_similarity"] if has_true_pair else None
                 eval_rows.append({
                     "model": model_name,
                     "list_pair": list_pair,
@@ -331,11 +342,28 @@ class embeddingSpace():
                     "query_sentence": query_sentence,
                     "has_true_pair": has_true_pair,
                     "true_pair_rank": rank,
+                    "true_pair_similarity": true_pair_score,
                     "in_top_n": has_true_pair and rank <= top_n,
                     "reciprocal_rank": 1 / rank if has_true_pair else None
                 })
 
         self.eval_scores = pd.DataFrame(eval_rows)
+
+        # Add rank percentile: fraction of candidates the true pair outscores (1.0 = top, model-comparable)
+        n_candidates = (
+            pd.DataFrame([
+                {"model": m, "list_pair": f"{a}v{b}",
+                 "n_candidates": len(df[df["list_pair"] == f"{a}v{b}"]["candidate_group_id"].unique())}
+                for m, df in self.pairwise_results.items()
+                for a, b in combinations(sorted(self.sentence_index["list_position"].unique()), 2)
+            ])
+        )
+        self.eval_scores = self.eval_scores.merge(n_candidates, on=["model", "list_pair"], how="left")
+        self.eval_scores["rank_percentile"] = self.eval_scores.apply(
+            lambda r: 1 - (r["true_pair_rank"] / r["n_candidates"]) if pd.notna(r["true_pair_rank"]) else None,
+            axis=1
+        )
+        self.eval_scores = self.eval_scores.drop(columns="n_candidates")
 
         # Count how many models passed for each (group, list_pair) — agreement signal
         agreement = (
